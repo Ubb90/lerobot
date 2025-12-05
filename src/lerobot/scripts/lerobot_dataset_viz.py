@@ -253,7 +253,7 @@ def main():
     parser.add_argument(
         "--tolerance-s",
         type=float,
-        default=1e-4,
+        default=1,
         help=(
             "Tolerance in seconds used to ensure data timestamps respect the dataset fps value"
             "This is argument passed to the constructor of LeRobotDataset and maps to its tolerance_s constructor argument"

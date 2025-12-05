@@ -49,7 +49,7 @@ class SmolVLAConfig(PreTrainedConfig):
 
     # Add empty images. Used by smolvla_aloha_sim which adds the empty
     # left and right wrist cameras in addition to the top camera.
-    empty_cameras: int = 0
+    empty_cameras: int = 1
 
     # Converts the joint and gripper values from the standard Aloha space to
     # the space used by the pi internal runtime which was used to train the base model.

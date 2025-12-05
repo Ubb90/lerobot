@@ -253,8 +253,25 @@ def decode_video_frames_torchcodec(
     # get metadata for frame information
     metadata = decoder.metadata
     average_fps = metadata.average_fps
+    num_frames = metadata.num_frames
+    
     # convert timestamps to frame indices
-    frame_indices = [round(ts * average_fps) for ts in timestamps]
+    frame_indices_raw = [round(ts * average_fps) for ts in timestamps]
+    
+    # Clamp frame indices to valid range [0, num_frames - 1]
+    frame_indices = [max(0, min(idx, num_frames - 1)) for idx in frame_indices_raw]
+    
+    # Check if any clamping occurred
+    if frame_indices != frame_indices_raw:
+        logging.warning(f"[WARNING] Frame indices clamped to valid range [0, {num_frames - 1}]")
+        for i, (raw_idx, clamped_idx) in enumerate(zip(frame_indices_raw, frame_indices)):
+            if raw_idx != clamped_idx:
+                logging.warning(
+                    f"[WARNING] Index {i}: timestamp={timestamps[i]:.6f}s, "
+                    f"raw_index={raw_idx} -> clamped_index={clamped_idx}"
+                )
+    
+
     # retrieve frames based on indices
     frames_batch = decoder.get_frames_at(indices=frame_indices)
 
