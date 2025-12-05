@@ -1,0 +1,116 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  generateName: lerobot-train-
+  namespace: pgr25florent
+spec:
+  backoffLimit: 0 # Don't retry automatically if code fails
+  template:
+    spec:
+      serviceAccountName: containerroot
+
+      # Hardware Request
+      nodeSelector:
+        nvidia.com/gpu.product: "NVIDIA-RTX-A6000"
+
+      volumes:
+      # 1. Output Storage (Personal)
+      - name: personal-storage
+        persistentVolumeClaim:
+          claimName: pgr25florentvol1claim
+
+      - name: ssh-key
+        secret:
+          secretName: launcher-ssh-key
+          defaultMode: 256
+
+      # 2. Input Data Storage (Shared)
+      - name: shared-storage
+        persistentVolumeClaim:
+          claimName: pgr25florent-datasets-claim
+
+      - name: dshm
+        emptyDir:
+          medium: Memory
+
+      containers:
+      - name: trainer
+        image: docker.io/fkgsoftware/lerobot-cluster:v1
+        imagePullPolicy: Always
+
+        securityContext:
+          runAsUser: 0
+
+        resources:
+          requests:
+            cpu: "4"
+            memory: "32Gi"
+            nvidia.com/gpu: "1"
+          limits:
+            cpu: "64"
+            memory: "64Gi"
+            nvidia.com/gpu: "1"
+
+        volumeMounts:
+        - name: personal-storage
+          mountPath: /data
+        - name: shared-storage
+          mountPath: /mnt/datasets
+          readOnly: true
+        - name: dshm
+          mountPath: /dev/shm
+        - name: ssh-key
+          mountPath: /root/.ssh
+
+        env:
+        - name: WANDB_MODE
+          value: "online"
+        - name: PYTHONUNBUFFERED
+          value: "1"
+
+        envFrom:
+        - secretRef:
+            name: launcher-global-env
+
+        command: ["/bin/bash", "-c"]
+        args:
+          - |
+            echo "--- STARTING LEROBOT TRAINING ---"
+            nvidia-smi
+
+            # Update repository if needed
+            git remote remove origin || true
+            git remote add origin https://github.com/huggingface/lerobot.git
+            git stash || true
+            git pull origin main || true
+
+            # 1. Verify Dataset Path before starting
+            DATASET_PATH="/mnt/datasets/lerobot/your_dataset_name"
+
+            if [ ! -d "$DATASET_PATH" ]; then
+              echo "ERROR: Dataset not found at $DATASET_PATH"
+              echo "Listing /mnt/datasets/lerobot to help debug:"
+              ls -F /mnt/datasets/lerobot/ || echo "Directory not found"
+              exit 1
+            fi
+
+            echo "Dataset found at: $DATASET_PATH"
+
+            # 2. Create Output Directory on Personal Storage
+            OUTPUT_DIR="/data/lerobot_outputs"
+            mkdir -p "$OUTPUT_DIR"
+
+            # 3. Run Training
+            # Example using lerobot-train command
+            # Adjust the arguments based on your policy and dataset
+            lerobot-train \
+              --policy-name act \
+              --dataset-repo-id "$DATASET_PATH" \
+              --output-dir "$OUTPUT_DIR" \
+              --num-epochs 100 \
+              --batch-size 64 \
+              --learning-rate 1e-4 \
+              --wandb-project lerobot-training \
+              2>&1 | tee "$OUTPUT_DIR/training_log.txt"
+
+      restartPolicy: OnFailure
