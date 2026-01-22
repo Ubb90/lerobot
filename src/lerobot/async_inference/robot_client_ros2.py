@@ -57,7 +57,7 @@ import grpc
 import numpy as np
 import rclpy
 import torch
-from geometry_msgs.msg import Point, Pose, Quaternion
+from geometry_msgs.msg import Point, Pose, PoseStamped, Quaternion
 from rclpy.node import Node
 from rclpy.qos import DurabilityPolicy, QoSProfile, ReliabilityPolicy
 from sensor_msgs.msg import Image, JointState
@@ -91,7 +91,7 @@ class RobotClientROS2Config:
     """
 
     # Policy configuration
-    policy_type: str = field(metadata={"help": "Type of policy to use (e.g., 'groot', 'act')"})
+    policy_type: str = field(metadata={"help": "Type of policy to use (e.g., 'groot', 'act', 'pi05')"})
     pretrained_name_or_path: str = field(metadata={"help": "Pretrained model name or path"})
 
     # Task instruction for the robot to execute
@@ -263,6 +263,8 @@ class RobotClientROS2(Node):
         self.policy_query_count = 0
         self.last_pose_update_time = None
         self.total_distance_moved = 0.0
+        self.convergence_wait_count = 0
+        self.max_convergence_wait = 5  # Skip convergence check after this many attempts
 
         # Action history buffer for temporal conditioning
         self.action_history = []
@@ -301,7 +303,7 @@ class RobotClientROS2(Node):
         self.logger.info(f"Subscribed to joint state topic: {self.config.robot_state_topic}")
 
         # Robot pose subscriber
-        self.create_subscription(Pose, self.config.robot_pose_topic, self.robot_pose_callback, qos_profile)
+        self.create_subscription(PoseStamped, self.config.robot_pose_topic, self.robot_pose_callback, qos_profile)
         self.logger.info(f"Subscribed to robot pose topic: {self.config.robot_pose_topic}")
 
         # Publishers
@@ -342,11 +344,11 @@ class RobotClientROS2(Node):
         except Exception as e:
             self.logger.error(f"Error converting camera image: {e}")
 
-    def robot_pose_callback(self, msg: Pose):
+    def robot_pose_callback(self, msg: PoseStamped):
         """Callback for robot pose messages."""
         try:
-            pos = msg.position
-            orient = msg.orientation
+            pos = msg.pose.position
+            orient = msg.pose.orientation
 
             new_pose = np.array([pos.x, pos.y, pos.z, orient.x, orient.y, orient.z, orient.w])
 
@@ -612,10 +614,23 @@ class RobotClientROS2(Node):
 
     def control_loop_callback(self):
         """Main control loop callback - executed at control_frequency Hz."""
+        # Log occasionally to confirm loop is running
+        if not hasattr(self, '_control_loop_counter'):
+            self._control_loop_counter = 0
+        self._control_loop_counter += 1
+        if self._control_loop_counter % 20 == 1:  # Log every 20 iterations
+            self.logger.info(f"🔄 Control loop iteration #{self._control_loop_counter}")
+        
         try:
             # Check if we have sufficient data
             if not self._data_ready():
-                self.logger.debug("Waiting for data...")
+                cameras_ready = len(self.camera_images) >= len(self.config.camera_topics)
+                joints_ready = self.latest_joint_states is not None
+                pose_ready = self.latest_robot_pose is not None
+                self.logger.info(
+                    f"⏳ Waiting for data... | Cameras: {len(self.camera_images)}/{len(self.config.camera_topics)} ready={cameras_ready} | "
+                    f"Joints: ready={joints_ready} | Pose: ready={pose_ready}"
+                )
                 return
 
             # Execute action if available
@@ -628,6 +643,13 @@ class RobotClientROS2(Node):
             # Send observation if ready
             if self._ready_to_send_observation():
                 self._send_observation()
+            else:
+                with self.action_queue_lock:
+                    queue_size = self.action_queue.qsize()
+                self.logger.info(
+                    f"⏸️  Not ready to send observation | Queue: {queue_size}/{self.action_chunk_size} | "
+                    f"Threshold: {self.config.chunk_size_threshold}"
+                )
 
         except Exception as e:
             self.logger.error(f"Error in control loop: {e}")
@@ -643,16 +665,31 @@ class RobotClientROS2(Node):
                     
                 current_error = np.linalg.norm(self.last_published_target - self.latest_robot_pose[:3])
                 if current_error > self.config.convergence_threshold:
-                    # Log periodically (every 2 seconds)
-                    if not hasattr(self, '_last_convergence_log') or (time.time() - self._last_convergence_log) > 2.0:
-                        self.logger.info(
-                            f"⏳ Waiting for convergence: error={current_error*1000:.1f}mm "
-                            f"(threshold={self.config.convergence_threshold*1000:.0f}mm) | "
-                            f"Current pose: [{self.latest_robot_pose[0]:.3f}, {self.latest_robot_pose[1]:.3f}, {self.latest_robot_pose[2]:.3f}] | "
-                            f"Target: [{self.last_published_target[0]:.3f}, {self.last_published_target[1]:.3f}, {self.last_published_target[2]:.3f}]"
+                    self.convergence_wait_count += 1
+                    
+                    # Timeout: skip convergence check after max attempts
+                    if self.convergence_wait_count >= self.max_convergence_wait:
+                        self.logger.warning(
+                            f"⚠️ Convergence timeout after {self.convergence_wait_count} attempts "
+                            f"(error={current_error*1000:.1f}mm). Proceeding anyway..."
                         )
-                        self._last_convergence_log = time.time()
-                    return
+                        self.convergence_wait_count = 0  # Reset counter
+                    else:
+                        # Log periodically (every 2 seconds)
+                        if not hasattr(self, '_last_convergence_log') or (time.time() - self._last_convergence_log) > 2.0:
+                            self.logger.info(
+                                f"⏳ Waiting for convergence ({self.convergence_wait_count}/{self.max_convergence_wait}): "
+                                f"error={current_error*1000:.1f}mm (threshold={self.config.convergence_threshold*1000:.0f}mm) | "
+                                f"Current pose: [{self.latest_robot_pose[0]:.3f}, {self.latest_robot_pose[1]:.3f}, {self.latest_robot_pose[2]:.3f}] | "
+                                f"Target: [{self.last_published_target[0]:.3f}, {self.last_published_target[1]:.3f}, {self.last_published_target[2]:.3f}]"
+                            )
+                            self._last_convergence_log = time.time()
+                        return
+                else:
+                    # Converged - reset counter
+                    if self.convergence_wait_count > 0:
+                        self.logger.info(f"✅ Converged after {self.convergence_wait_count} checks")
+                    self.convergence_wait_count = 0
 
             # Get action from queue
             with self.action_queue_lock:
