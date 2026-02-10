@@ -282,7 +282,6 @@ class RobotClientROS2(Node):
 
         # Control synchronization
         self.shutdown_event = threading.Event()
-        self.start_barrier = threading.Barrier(2)  # 2 threads: action receiver, control loop
         self.must_go = threading.Event()
         self.must_go.set()  # Initially set
 
@@ -648,20 +647,20 @@ class RobotClientROS2(Node):
 
     def receive_actions(self):
         """Receive actions from the policy server."""
-        self.start_barrier.wait()
-        self.logger.info("Action receiving thread starting")
+        self.logger.info("✅ Action receiving thread started and ready!")
 
         action_request_count = 0
         while self.running:
             try:
                 action_request_count += 1
-                if action_request_count % 10 == 1:  # Log every 10th request
-                    self.logger.info(f"🔄 Requesting actions from server (request #{action_request_count})...")
+                self.logger.info(f"🔄 Requesting actions from server (request #{action_request_count})...")
                 
-                actions_chunk = self.stub.GetActions(services_pb2.Empty())
+                # Add timeout to prevent infinite blocking
+                actions_chunk = self.stub.GetActions(services_pb2.Empty(), timeout=5.0)
                 
                 if len(actions_chunk.data) == 0:
-                    self.logger.debug("Received empty action chunk")
+                    self.logger.warning(f"⚠️ Received empty action chunk (request #{action_request_count})")
+                    time.sleep(0.1)
                     continue
 
                 receive_time = time.time()
@@ -735,9 +734,14 @@ class RobotClientROS2(Node):
             # Execute action if available
             with self.action_queue_lock:
                 has_actions = not self.action_queue.empty()
+                queue_size = self.action_queue.qsize()
 
             if has_actions:
                 self._execute_action()
+            else:
+                # Log when waiting for actions (every 10 iterations)
+                if self._control_loop_counter % 10 == 1:
+                    self.logger.info(f"⏳ Waiting for actions... (queue empty, chunk_size={self.action_chunk_size})")
 
             # Send observation if ready
             if self._ready_to_send_observation():
@@ -1044,7 +1048,8 @@ class RobotClientROS2(Node):
         
         # Add to observation dict with a special key that the policy will recognize
         # The policy training code should also use this key for action history
-        obs_dict["action_history"] = torch.from_numpy(history_array)
+        # Keep as numpy array - server will convert to tensor
+        obs_dict["action_history"] = history_array
         
         self.logger.debug(f"Action history observation shape: {history_array.shape}")
         return obs_dict
@@ -1093,10 +1098,10 @@ class RobotClientROS2(Node):
             # Build observation dictionary using hardware feature keys (not lerobot keys)
             raw_observation: RawObservation = {}
 
-            # Add camera images (convert to torch tensors)
+            # Add camera images (keep as numpy arrays - server will convert to tensors)
             for key in self.config.camera_keys:
                 if key in self.camera_images:
-                    raw_observation[key] = torch.from_numpy(self.camera_images[key])
+                    raw_observation[key] = self.camera_images[key]  # Already numpy array
 
             # Add robot state: end effector pose + rotation + gripper (8 dimensions total)
             # NOTE: These should be SCALAR values (float), not tensors!
@@ -1181,15 +1186,13 @@ def async_client_ros2(cfg: RobotClientROS2Config):
             return
 
         # Start action receiver thread
-        client.logger.info("Starting action receiver thread...")
+        client.logger.info("🚀 Starting action receiver thread...")
         action_receiver_thread = threading.Thread(target=client.receive_actions, daemon=True)
         action_receiver_thread.start()
+        client.logger.info(f"📊 Action receiver thread alive: {action_receiver_thread.is_alive()}")
 
-        # Wait for initial sync
-        client.start_barrier.wait()
-
-        # Spin ROS2 node
-        client.logger.info("Starting ROS2 spin loop...")
+        # Spin ROS2 node (control loop runs via timer callbacks)
+        client.logger.info("🔄 Starting ROS2 spin loop (control loop will run via timer callbacks)...")
         rclpy.spin(client)
 
     except KeyboardInterrupt:
