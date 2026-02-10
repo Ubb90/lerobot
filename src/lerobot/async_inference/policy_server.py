@@ -25,6 +25,7 @@ python -m lerobot.async_inference.policy_server \
 """
 
 import logging
+import os
 import pickle  # nosec
 import threading
 import time

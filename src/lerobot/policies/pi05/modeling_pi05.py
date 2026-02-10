@@ -573,15 +573,23 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             # Also compile the main forward pass used during training
             self.forward = torch.compile(self.forward, mode=config.compile_mode)
 
-        msg = """An incorrect transformer version is used, please create an issue on https://github.com/huggingface/lerobot/issues"""
-
+        # Check for custom transformers (only needed for certain training features)
+        # For inference with pretrained models, standard transformers works fine
         try:
             from transformers.models.siglip import check
 
             if not check.check_whether_transformers_replace_is_installed_correctly():
-                raise ValueError(msg)
+                logging.warning(
+                    "Custom transformers branch not detected. This is only required for training. "
+                    "For inference, standard transformers works fine. "
+                    "To install custom transformers for training: pip install 'lerobot[pi]'"
+                )
         except ImportError:
-            raise ValueError(msg) from None
+            logging.warning(
+                "Custom transformers branch not detected. This is only required for training. "
+                "For inference, standard transformers works fine. "
+                "To install custom transformers for training: pip install 'lerobot[pi]'"
+            )
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""
@@ -974,24 +982,46 @@ class PI05Policy(PreTrainedPolicy):
             # Try to load the pytorch_model.bin or model.safetensors file
             print(f"Loading model from: {pretrained_name_or_path}")
             try:
-                from transformers.utils import cached_file
+                # Check if it's a local directory first
+                pretrained_path = Path(pretrained_name_or_path)
+                is_local = pretrained_path.exists() and pretrained_path.is_dir()
+                
+                if is_local:
+                    # For local paths, directly construct the path to the model file
+                    safetensors_path = pretrained_path / "model.safetensors"
+                    pytorch_path = pretrained_path / "pytorch_model.bin"
+                    
+                    if safetensors_path.exists():
+                        from safetensors.torch import load_file
+                        original_state_dict = load_file(str(safetensors_path))
+                        print("✓ Loaded state dict from model.safetensors")
+                    elif pytorch_path.exists():
+                        original_state_dict = torch.load(str(pytorch_path), map_location="cpu")
+                        print("✓ Loaded state dict from pytorch_model.bin")
+                    else:
+                        raise FileNotFoundError(
+                            f"Could not find model.safetensors or pytorch_model.bin in {pretrained_path}"
+                        )
+                else:
+                    # For HuggingFace Hub paths, use cached_file
+                    from transformers.utils import cached_file
 
-                # Try safetensors first
-                resolved_file = cached_file(
-                    pretrained_name_or_path,
-                    "model.safetensors",
-                    cache_dir=kwargs.get("cache_dir"),
-                    force_download=kwargs.get("force_download", False),
-                    resume_download=kwargs.get("resume_download"),
-                    proxies=kwargs.get("proxies"),
-                    use_auth_token=kwargs.get("use_auth_token"),
-                    revision=kwargs.get("revision"),
-                    local_files_only=kwargs.get("local_files_only", False),
-                )
-                from safetensors.torch import load_file
+                    # Try safetensors first
+                    resolved_file = cached_file(
+                        pretrained_name_or_path,
+                        "model.safetensors",
+                        cache_dir=kwargs.get("cache_dir"),
+                        force_download=kwargs.get("force_download", False),
+                        resume_download=kwargs.get("resume_download"),
+                        proxies=kwargs.get("proxies"),
+                        use_auth_token=kwargs.get("use_auth_token"),
+                        revision=kwargs.get("revision"),
+                        local_files_only=kwargs.get("local_files_only", False),
+                    )
+                    from safetensors.torch import load_file
 
-                original_state_dict = load_file(resolved_file)
-                print("✓ Loaded state dict from model.safetensors")
+                    original_state_dict = load_file(resolved_file)
+                    print("✓ Loaded state dict from model.safetensors")
             except Exception as e:
                 print(f"Could not load state dict from remote files: {e}")
                 print("Returning model without loading pretrained weights")
