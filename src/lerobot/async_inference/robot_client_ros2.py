@@ -144,6 +144,24 @@ class RobotClientROS2Config:
     gripper_topic: str = field(
         default="/right_hand/trigger", metadata={"help": "Topic to publish gripper commands"}
     )
+    robot_base_pose_topic: str = field(
+        default="/robot_base/pose",
+        metadata={"help": "Topic for robot base pose (only used for ACT policy)"},
+    )
+
+    # URDF configuration for forward kinematics (only used for ACT policy)
+    urdf_path: str = field(
+        default="",
+        metadata={"help": "Path to URDF file for forward kinematics (required for ACT policy)"},
+    )
+    end_effector_link: str = field(
+        default="gripper_ee",
+        metadata={"help": "Name of end effector link in URDF"},
+    )
+    base_link: str = field(
+        default="track_body",
+        metadata={"help": "Name of base link in URDF"},
+    )
 
     # Feature keys for policy (these map to the expected state keys in the policy)
     joint_position_keys: List[str] = field(
@@ -243,6 +261,16 @@ class RobotClientROS2(Node):
         self.camera_images = {}
         self.latest_joint_states = None
         self.latest_robot_pose = None
+        self.latest_base_pose = None  # Only used for ACT policy
+
+        # URDF and forward kinematics (only for ACT policy)
+        self.robot_urdf = None
+        self.kinematic_chain = []
+        if self.config.policy_type.lower() == "act":
+            if not self.config.urdf_path:
+                raise ValueError("urdf_path is required when using ACT policy")
+            self.load_urdf()
+            self.logger.info(f"Forward kinematics ready with {len(self.kinematic_chain)} joints")
 
         # Action queue management
         self.action_queue = Queue()
@@ -305,6 +333,13 @@ class RobotClientROS2(Node):
         # Robot pose subscriber
         self.create_subscription(PoseStamped, self.config.robot_pose_topic, self.robot_pose_callback, qos_profile)
         self.logger.info(f"Subscribed to robot pose topic: {self.config.robot_pose_topic}")
+
+        # Robot base pose subscriber (only for ACT policy)
+        if self.config.policy_type.lower() == "act":
+            self.create_subscription(
+                PoseStamped, self.config.robot_base_pose_topic, self.base_pose_callback, qos_profile
+            )
+            self.logger.info(f"Subscribed to robot base pose topic: {self.config.robot_base_pose_topic}")
 
         # Publishers
         self.ee_pose_pub = self.create_publisher(Pose, self.config.ee_pose_topic, qos_profile)
@@ -372,6 +407,70 @@ class RobotClientROS2(Node):
 
         except Exception as e:
             self.logger.error(f"Error processing robot pose: {e}")
+
+    def base_pose_callback(self, msg: PoseStamped):
+        """Callback for robot base pose messages (only used for ACT policy)."""
+        try:
+            pos = msg.pose.position
+            orient = msg.pose.orientation
+
+            self.latest_base_pose = np.array([pos.x, pos.y, pos.z, orient.x, orient.y, orient.z, orient.w])
+            self.logger.debug(
+                f"[BASE POSE UPDATE] [{pos.x:.3f}, {pos.y:.3f}, {pos.z:.3f}] | "
+                f"quat: [{orient.x:.3f}, {orient.y:.3f}, {orient.z:.3f}, {orient.w:.3f}]"
+            )
+
+        except Exception as e:
+            self.logger.error(f"Error processing base pose: {e}")
+
+    def load_urdf(self):
+        """Load and parse the URDF file for forward kinematics."""
+        try:
+            from urdf_parser_py.urdf import URDF
+            import os
+
+            if not os.path.exists(self.config.urdf_path):
+                raise FileNotFoundError(f"URDF file not found: {self.config.urdf_path}")
+
+            self.robot_urdf = URDF.from_xml_file(self.config.urdf_path)
+            self.build_kinematic_chain()
+            self.logger.info(f"Successfully loaded URDF from {self.config.urdf_path}")
+
+        except ImportError:
+            raise ImportError(
+                "urdf_parser_py is required for ACT policy. Install with: pip install urdf-parser-py"
+            )
+        except Exception as e:
+            raise RuntimeError(f"Failed to load URDF: {e}")
+
+    def build_kinematic_chain(self):
+        """Build the kinematic chain from base to end effector."""
+        if not self.robot_urdf:
+            return
+
+        # Build a map of link -> joint connections
+        link_to_joint = {}
+        for joint in self.robot_urdf.joints:
+            link_to_joint[joint.child] = joint
+
+        # Walk from end effector back to base link to build the chain
+        chain = []
+        current = self.config.end_effector_link
+
+        while current != self.config.base_link and current in link_to_joint:
+            chain.insert(0, link_to_joint[current])
+            current = link_to_joint[current].parent
+
+        if current != self.config.base_link:
+            raise RuntimeError(
+                f"Could not trace {self.config.end_effector_link} back to {self.config.base_link}, "
+                f"stopped at {current}"
+            )
+
+        self.kinematic_chain = chain
+        self.logger.info(f"Built kinematic chain with {len(self.kinematic_chain)} joints")
+        for joint in self.kinematic_chain:
+            self.logger.debug(f"  - {joint.name} ({joint.type})")
 
     def joint_state_callback(self, msg: JointState):
         """Callback for joint state messages."""
@@ -718,17 +817,185 @@ class RobotClientROS2(Node):
         except Exception as e:
             self.logger.error(f"Error executing action: {e}")
 
+    def _compute_forward_kinematics(self, joint_positions: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+        """Compute forward kinematics from joint positions to get end effector pose.
+        
+        Args:
+            joint_positions: Array of joint angles for the kinematic chain
+            
+        Returns:
+            Tuple of (position [x, y, z], rotation quaternion [qx, qy, qz, qw])
+        """
+        if not self.robot_urdf or not self.kinematic_chain:
+            self.logger.error("URDF not loaded or kinematic chain not built")
+            return np.array([0.0, 0.0, 0.0]), np.array([0.0, 0.0, 0.0, 1.0])
+
+        import math
+
+        # Create a mapping of joint names to positions
+        joint_position_map = {}
+        for i, key in enumerate(self.config.joint_position_keys):
+            if i < len(joint_positions):
+                joint_position_map[key] = joint_positions[i]
+
+        # Apply all transformations from base to end effector
+        transform = np.eye(4)
+
+        for joint in self.kinematic_chain:
+            origin = joint.origin
+            if not origin:
+                continue
+
+            dx, dy, dz = origin.xyz if origin.xyz else [0, 0, 0]
+            roll, pitch, yaw = origin.rpy if origin.rpy else [0, 0, 0]
+
+            # Build the rotation matrix
+            if joint.type == 'revolute':
+                # For revolute joints: origin RPY + joint angle rotation
+                cos_r, sin_r = math.cos(roll), math.sin(roll)
+                cos_p, sin_p = math.cos(pitch), math.sin(pitch)
+                cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+
+                R_origin = np.array([
+                    [cos_y*cos_p, cos_y*sin_p*sin_r - sin_y*cos_r, cos_y*sin_p*cos_r + sin_y*sin_r],
+                    [sin_y*cos_p, sin_y*sin_p*sin_r + cos_y*cos_r, sin_y*sin_p*cos_r - cos_y*sin_r],
+                    [-sin_p, cos_p*sin_r, cos_p*cos_r]
+                ])
+
+                axis = np.array(joint.axis, dtype=np.float64) if joint.axis else np.array([0, 0, 1])
+                axis = axis / np.linalg.norm(axis)
+                joint_angle = joint_position_map.get(joint.name, 0.0)
+                R_joint = self._create_rotation_matrix(axis, joint_angle)[:3, :3]
+                R_total = R_origin @ R_joint
+            else:
+                # For fixed joints: just use origin RPY
+                cos_r, sin_r = math.cos(roll), math.sin(roll)
+                cos_p, sin_p = math.cos(pitch), math.sin(pitch)
+                cos_y, sin_y = math.cos(yaw), math.sin(yaw)
+
+                R_total = np.array([
+                    [cos_y*cos_p, cos_y*sin_p*sin_r - sin_y*cos_r, cos_y*sin_p*cos_r + sin_y*sin_r],
+                    [sin_y*cos_p, sin_y*sin_p*sin_r + cos_y*cos_r, sin_y*sin_p*cos_r - cos_y*sin_r],
+                    [-sin_p, cos_p*sin_r, cos_p*cos_r]
+                ])
+
+            # Build 4x4 transform and accumulate
+            T = np.eye(4)
+            T[:3, :3] = R_total
+            T[:3, 3] = [dx, dy, dz]
+            transform = transform @ T
+
+        # Extract position and orientation from transformation matrix
+        position = transform[:3, 3].astype(np.float32)
+        rotation_matrix = transform[:3, :3]
+        quaternion = self._rotation_matrix_to_quaternion(rotation_matrix)
+
+        return position, quaternion
+
+    def _create_rotation_matrix(self, axis: np.ndarray, angle: float) -> np.ndarray:
+        """Create a 4x4 rotation matrix around given axis by given angle."""
+        import math
+
+        axis = axis / np.linalg.norm(axis)  # Normalize axis
+        cos_a, sin_a = math.cos(angle), math.sin(angle)
+        ux, uy, uz = axis
+
+        # Rodrigues' rotation formula
+        R = np.array([
+            [cos_a + ux*ux*(1-cos_a), ux*uy*(1-cos_a) - uz*sin_a, ux*uz*(1-cos_a) + uy*sin_a],
+            [uy*ux*(1-cos_a) + uz*sin_a, cos_a + uy*uy*(1-cos_a), uy*uz*(1-cos_a) - ux*sin_a],
+            [uz*ux*(1-cos_a) - uy*sin_a, uz*uy*(1-cos_a) + ux*sin_a, cos_a + uz*uz*(1-cos_a)]
+        ])
+
+        # Create 4x4 matrix
+        T = np.eye(4)
+        T[:3, :3] = R
+        return T
+
+    def _rotation_matrix_to_quaternion(self, R: np.ndarray) -> np.ndarray:
+        """Convert rotation matrix to quaternion [x, y, z, w]."""
+        import math
+
+        trace = np.trace(R)
+
+        if trace > 0:
+            s = math.sqrt(trace + 1.0) * 2
+            w = 0.25 * s
+            x = (R[2, 1] - R[1, 2]) / s
+            y = (R[0, 2] - R[2, 0]) / s
+            z = (R[1, 0] - R[0, 1]) / s
+        elif R[0, 0] > R[1, 1] and R[0, 0] > R[2, 2]:
+            s = math.sqrt(1.0 + R[0, 0] - R[1, 1] - R[2, 2]) * 2
+            w = (R[2, 1] - R[1, 2]) / s
+            x = 0.25 * s
+            y = (R[0, 1] + R[1, 0]) / s
+            z = (R[0, 2] + R[2, 0]) / s
+        elif R[1, 1] > R[2, 2]:
+            s = math.sqrt(1.0 + R[1, 1] - R[0, 0] - R[2, 2]) * 2
+            w = (R[0, 2] - R[2, 0]) / s
+            x = (R[0, 1] + R[1, 0]) / s
+            y = 0.25 * s
+            z = (R[1, 2] + R[2, 1]) / s
+        else:
+            s = math.sqrt(1.0 + R[2, 2] - R[0, 0] - R[1, 1]) * 2
+            w = (R[1, 0] - R[0, 1]) / s
+            x = (R[0, 2] + R[2, 0]) / s
+            y = (R[1, 2] + R[2, 1]) / s
+            z = 0.25 * s
+
+        return np.array([x, y, z, w])
+
     def _parse_action(self, action_tensor: torch.Tensor) -> Dict[str, np.ndarray]:
-        """Parse action tensor into pose, rotation, and gripper components."""
-        # Expected action format: [x, y, z, qx, qy, qz, qw, gripper]
-        # Adjust based on your policy's output format
+        """Parse action tensor into pose, rotation, and gripper components.
+        
+        For ACT policy: action is joint positions -> compute FK -> add base pose
+        For other policies: action is directly [x, y, z, qx, qy, qz, qw, gripper]
+        """
         action_np = action_tensor.cpu().numpy() if isinstance(action_tensor, torch.Tensor) else action_tensor
 
-        return {
-            "pose": action_np[:3],  # [x, y, z]
-            "rotation": action_np[3:7],  # [qx, qy, qz, qw]
-            "gripper": float(action_np[7]) if len(action_np) > 7 else 0.0,
-        }
+        # ACT policy outputs joint positions, not end effector pose
+        if self.config.policy_type.lower() == "act":
+            # Expected ACT action format: [joint1, joint2, ..., jointN, gripper]
+            num_joints = len(self.config.joint_position_keys)
+            joint_positions = action_np[:num_joints]
+            gripper_value = float(action_np[num_joints]) if len(action_np) > num_joints else 0.0
+            
+            # Compute forward kinematics
+            ee_position, ee_rotation = self._compute_forward_kinematics(joint_positions)
+            
+            # Add robot base pose if available
+            if self.latest_base_pose is not None:
+                # Transform end effector pose from robot base frame to world frame
+                # Base pose: [x, y, z, qx, qy, qz, qw]
+                base_pos = self.latest_base_pose[:3]
+                base_quat = self.latest_base_pose[3:7]
+                
+                # Simple position addition (for more accuracy, use proper quaternion rotation)
+                # TODO: Implement proper homogeneous transformation if needed
+                ee_position = ee_position + base_pos
+                
+                # For rotation, you may want to compose quaternions
+                # For now, keeping EE rotation as-is (relative to base)
+                self.logger.debug(
+                    f"ACT FK result: pos={ee_position}, quat={ee_rotation}, "
+                    f"base_pos={base_pos}, gripper={gripper_value}"
+                )
+            else:
+                self.logger.warning("Base pose not available for ACT policy - using FK result without base transform")
+            
+            return {
+                "pose": ee_position,
+                "rotation": ee_rotation,
+                "gripper": gripper_value,
+            }
+        
+        # Other policies (e.g., GROOT, PI0) output end effector pose directly
+        else:
+            return {
+                "pose": action_np[:3],  # [x, y, z]
+                "rotation": action_np[3:7],  # [qx, qy, qz, qw]
+                "gripper": float(action_np[7]) if len(action_np) > 7 else 0.0,
+            }
 
     def _add_to_action_history(self, action: torch.Tensor):
         """Add executed action to history buffer for temporal conditioning."""
