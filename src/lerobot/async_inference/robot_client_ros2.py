@@ -282,8 +282,6 @@ class RobotClientROS2(Node):
 
         # Control synchronization
         self.shutdown_event = threading.Event()
-        self.must_go = threading.Event()
-        self.must_go.set()  # Initially set
 
         # Tracking variables
         self.last_published_target = None
@@ -683,7 +681,6 @@ class RobotClientROS2(Node):
 
                 # Update action queue
                 self._aggregate_action_queues(timed_actions, self.config.aggregate_fn)
-                self.must_go.set()
 
             except grpc.RpcError as e:
                 self.logger.error(f"❌ gRPC Error receiving actions: {e}")
@@ -1142,12 +1139,12 @@ class RobotClientROS2(Node):
                 timestamp=time.time(), observation=raw_observation, timestep=max(latest_action, 0)
             )
 
-            # Set must_go flag
+            # Set must_go flag - tell server to run inference if action queue is empty
             with self.action_queue_lock:
-                observation.must_go = self.must_go.is_set() and self.action_queue.empty()
-
-            if observation.must_go:
-                self.must_go.clear()
+                action_queue_empty = self.action_queue.empty()
+            
+            observation.must_go = action_queue_empty
+            self.logger.debug(f"Observation must_go={observation.must_go}, queue_empty={action_queue_empty}")
 
             # Send observation
             _ = self.send_observation(observation)
@@ -1156,7 +1153,7 @@ class RobotClientROS2(Node):
             fps_metrics = self.fps_tracker.calculate_fps_metrics(observation.get_timestamp())
             self.logger.info(
                 f"Sent observation #{observation.get_timestep()} | "
-                f"Must go: {observation.must_go} | "
+                f"Must go (queue empty): {observation.must_go} | "
                 f"Avg FPS: {fps_metrics['avg_fps']:.2f}"
             )
 
