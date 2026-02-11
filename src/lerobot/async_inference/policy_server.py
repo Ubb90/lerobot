@@ -264,7 +264,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             return services_pb2.Empty()
 
         except Exception as e:
-            self.logger.error(f"Error in StreamActions: {e}")
+            self.logger.error(f"❌ Error in StreamActions: {e}")
+            import traceback
+            self.logger.error(f"Traceback:\n{traceback.format_exc()}")
 
             return services_pb2.Empty()
 
@@ -341,6 +343,7 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         5. Convert to TimedAction list
         """
         """1. Prepare observation"""
+        self.logger.info(f"🔧 Step 1: Preparing observation #{observation_t.get_timestep()}...")
         start_prepare = time.perf_counter()
         observation: Observation = raw_observation_to_observation(
             observation_t.get_observation(),
@@ -348,22 +351,28 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             self.policy_image_features,
         )
         prepare_time = time.perf_counter() - start_prepare
+        self.logger.info(f"✅ Step 1 complete: Prepared in {prepare_time*1000:.2f}ms")
 
         """2. Apply preprocessor"""
+        self.logger.info(f"🔧 Step 2: Applying preprocessor...")
         start_preprocess = time.perf_counter()
         observation = self.preprocessor(observation)
         self.last_processed_obs: TimedObservation = observation_t
         preprocessing_time = time.perf_counter() - start_preprocess
+        self.logger.info(f"✅ Step 2 complete: Preprocessed in {preprocessing_time*1000:.2f}ms")
 
         """3. Get action chunk"""
+        self.logger.info(f"🔧 Step 3: Running model inference...")
         start_inference = time.perf_counter()
         action_tensor = self._get_action_chunk(observation)
         inference_time = time.perf_counter() - start_inference
+        self.logger.info(f"✅ Step 3 complete: Inference in {inference_time*1000:.2f}ms")
         self.logger.info(
             f"Preprocessing and inference took {inference_time:.4f}s, action shape: {action_tensor.shape}"
         )
 
         """4. Apply postprocessor"""
+        self.logger.info(f"🔧 Step 4: Applying postprocessor...")
         # Apply postprocessor (handles unnormalization and device movement)
         # Postprocessor expects (B, action_dim) per action, but we have (B, chunk_size, action_dim)
         # So we process each action in the chunk individually
@@ -383,13 +392,15 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.logger.debug(f"Postprocessed action shape: {action_tensor.shape}")
 
         action_tensor = action_tensor.detach().cpu()
+        postprocess_stops = time.perf_counter()
+        postprocessing_time = postprocess_stops - start_postprocess
+        self.logger.info(f"✅ Step 4 complete: Postprocessed in {postprocessing_time*1000:.2f}ms")
 
         """5. Convert to TimedAction list"""
+        self.logger.info(f"🔧 Step 5: Creating TimedAction list...")
         action_chunk = self._time_action_chunk(
             observation_t.get_timestamp(), list(action_tensor), observation_t.get_timestep()
         )
-        postprocess_stops = time.perf_counter()
-        postprocessing_time = postprocess_stops - start_postprocess
 
         self.logger.info(
             f"Observation {observation_t.get_timestep()} | "
