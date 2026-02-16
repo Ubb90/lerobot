@@ -653,8 +653,8 @@ class RobotClientROS2(Node):
                 action_request_count += 1
                 self.logger.info(f"🔄 Requesting actions from server (request #{action_request_count})...")
                 
-                # Add timeout to prevent infinite blocking
-                actions_chunk = self.stub.GetActions(services_pb2.Empty(), timeout=5.0)
+                # Use configurable timeout to prevent infinite blocking
+                actions_chunk = self.stub.GetActions(services_pb2.Empty(), timeout=self.config.grpc_timeout)
                 
                 if len(actions_chunk.data) == 0:
                     self.logger.warning(f"⚠️ Received empty action chunk (request #{action_request_count})")
@@ -683,8 +683,17 @@ class RobotClientROS2(Node):
                 self._aggregate_action_queues(timed_actions, self.config.aggregate_fn)
 
             except grpc.RpcError as e:
-                self.logger.error(f"❌ gRPC Error receiving actions: {e}")
-                self.logger.error(f"Error details - Code: {e.code()}, Details: {e.details()}")
+                if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
+                    self.logger.error(
+                        f"⏰ gRPC timeout after {self.config.grpc_timeout}s waiting for actions. "
+                        f"The model inference may be taking too long. "
+                        f"Consider: (1) Increasing --grpc_timeout, "
+                        f"(2) Reducing --num_inference_steps for diffusion models, "
+                        f"or (3) Using a faster model."
+                    )
+                else:
+                    self.logger.error(f"❌ gRPC Error receiving actions: {e}")
+                    self.logger.error(f"Error details - Code: {e.code()}, Details: {e.details()}")
                 time.sleep(0.1)  # Brief pause before retry
             except Exception as e:
                 self.logger.error(f"❌ Unexpected error in receive_actions: {e}")

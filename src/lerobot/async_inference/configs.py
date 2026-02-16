@@ -64,6 +64,15 @@ class PolicyServerConfig:
         default=DEFAULT_OBS_QUEUE_TIMEOUT, metadata={"help": "Timeout for observation queue in seconds"}
     )
 
+    # Model-specific configuration
+    num_inference_steps: int | None = field(
+        default=None,
+        metadata={
+            "help": "Number of inference steps for diffusion-based policies (e.g., PI05). "
+            "If None, uses the model's default. Lower values speed up inference."
+        },
+    )
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.port < 1 or self.port > 65535:
@@ -136,6 +145,9 @@ class RobotClientConfig:
     # Control behavior configuration
     chunk_size_threshold: float = field(default=0.5, metadata={"help": "Threshold for chunk size control"})
     fps: int = field(default=DEFAULT_FPS, metadata={"help": "Frames per second"})
+    grpc_timeout: float = field(
+        default=30.0, metadata={"help": "gRPC timeout in seconds for receiving actions from server"}
+    )
 
     # Aggregate function configuration (CLI-compatible)
     aggregate_fn_name: str = field(

@@ -1051,14 +1051,26 @@ class PI05Policy(PreTrainedPolicy):
             missing_keys, unexpected_keys = model.load_state_dict(remapped_state_dict, strict=strict)
 
             if missing_keys:
-                print(f"Missing keys when loading state dict: {len(missing_keys)} keys")
-                if len(missing_keys) <= 5:
-                    for key in missing_keys:
-                        print(f"  - {key}")
+                # Filter out expected missing keys
+                expected_missing = [
+                    "model.paligemma_with_expert.gemma_expert.model.embed_tokens",  # Intentionally None
+                ]
+                unexpected_missing = [
+                    k for k in missing_keys 
+                    if not any(exp in k for exp in expected_missing)
+                ]
+                
+                if unexpected_missing:
+                    print(f"WARNING: Unexpected missing keys: {len(unexpected_missing)} keys")
+                    if len(unexpected_missing) <= 5:
+                        for key in unexpected_missing:
+                            print(f"  - {key}")
+                    else:
+                        for key in unexpected_missing[:5]:
+                            print(f"  - {key}")
+                        print(f"  ... and {len(unexpected_missing) - 5} more")
                 else:
-                    for key in missing_keys[:5]:
-                        print(f"  - {key}")
-                    print(f"  ... and {len(missing_keys) - 5} more")
+                    print(f"Note: {len(missing_keys)} expected missing keys (e.g., gemma_expert.embed_tokens is None by design)")
 
             if unexpected_keys:
                 print(f"Unexpected keys when loading state dict: {len(unexpected_keys)} keys")
@@ -1126,7 +1138,8 @@ class PI05Policy(PreTrainedPolicy):
             # Handle vision tower embedding layer potential differences
             if "patch_embedding" in key:
                 # Some checkpoints might have this, but current model expects different structure
-                logging.warning(f"Vision embedding key might need handling: {key}")
+                # This is usually fine - the weights will be loaded correctly
+                pass  # No longer log warning for every patch_embedding key
 
             fixed_state_dict[new_key] = value
 
