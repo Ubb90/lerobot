@@ -448,6 +448,7 @@ class PaliGemmaWithExpertModel(
     def embed_language_tokens(self, tokens: torch.Tensor):
         return self.paligemma.language_model.embed_tokens(tokens)
 
+    @torch.compiler.disable()  # Disable compilation to avoid long compile times for language model
     def forward(
         self,
         attention_mask: torch.Tensor | None = None,
@@ -457,9 +458,15 @@ class PaliGemmaWithExpertModel(
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,
     ):
+        import logging
+        import time
+        logger = logging.getLogger(__name__)
+        
         if adarms_cond is None:
             adarms_cond = [None, None]
         if inputs_embeds[1] is None:
+            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Taking prefix-only path")
+            start_time = time.time()
             prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
@@ -468,10 +475,14 @@ class PaliGemmaWithExpertModel(
                 use_cache=use_cache,
                 adarms_cond=adarms_cond[0] if adarms_cond is not None else None,
             )
+            elapsed = time.time() - start_time
+            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Prefix forward completed in {elapsed:.3f}s")
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
             suffix_output = None
         elif inputs_embeds[0] is None:
+            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Taking suffix-only path")
+            start_time = time.time()
             suffix_output = self.gemma_expert.model.forward(
                 inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
@@ -480,10 +491,14 @@ class PaliGemmaWithExpertModel(
                 use_cache=use_cache,
                 adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
             )
+            elapsed = time.time() - start_time
+            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Suffix forward completed in {elapsed:.3f}s")
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
             prefix_past_key_values = None
         else:
+            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Taking interleaved path with {self.paligemma.config.text_config.num_hidden_layers} layers")
+            start_time = time.time()
             models = [self.paligemma.language_model, self.gemma_expert.model]
             num_layers = self.paligemma.config.text_config.num_hidden_layers
 
@@ -543,6 +558,8 @@ class PaliGemmaWithExpertModel(
             prefix_output = outputs_embeds[0]
             suffix_output = outputs_embeds[1]
             prefix_past_key_values = None
+            elapsed = time.time() - start_time
+            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Interleaved forward completed in {elapsed:.3f}s")
 
         return [prefix_output, suffix_output], prefix_past_key_values
 
@@ -866,6 +883,11 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
 
         logger.info(f"[DEBUG] sample_actions: Calling paligemma_with_expert.forward for prefix...")
+        logger.info(f"[DEBUG] sample_actions: Model training mode: {self.paligemma_with_expert.training}")
+        logger.info(f"[DEBUG] sample_actions: Input embeds shape: {prefix_embs.shape}, device: {prefix_embs.device}")
+        
+        import time as time_module
+        forward_start = time_module.time()
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
@@ -873,7 +895,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
         )
-        logger.info(f"[DEBUG] sample_actions: Prefix forward complete, starting denoising loop with {num_steps} steps...")
+        forward_elapsed = time_module.time() - forward_start
+        logger.info(f"[DEBUG] sample_actions: Prefix forward complete in {forward_elapsed:.3f}s, starting denoising loop with {num_steps} steps...")
 
         dt = -1.0 / num_steps
 
