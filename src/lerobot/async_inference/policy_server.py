@@ -90,6 +90,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
         self.policy = None
         self.preprocessor: PolicyProcessorPipeline[dict[str, Any], dict[str, Any]] | None = None
         self.postprocessor: PolicyProcessorPipeline[PolicyAction, PolicyAction] | None = None
+        
+        # Cache the loaded policy specs to avoid unnecessary reloading
+        self._loaded_policy_specs: RemotePolicyConfig | None = None
 
     @property
     def running(self):
@@ -99,6 +102,20 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     def policy_image_features(self):
         return self.policy.config.image_features
 
+    def _should_reload_policy(self, new_specs: RemotePolicyConfig) -> bool:
+        """Check if policy needs to be reloaded based on specs comparison."""
+        if self._loaded_policy_specs is None or self.policy is None:
+            return True
+        
+        # Compare critical policy parameters
+        old = self._loaded_policy_specs
+        return (
+            old.policy_type != new_specs.policy_type
+            or old.pretrained_name_or_path != new_specs.pretrained_name_or_path
+            or old.device != new_specs.device
+            or old.rename_map != new_specs.rename_map
+        )
+
     def _reset_server(self) -> None:
         """Flushes server state when new client connects."""
         # only running inference on the latest observation received by the server
@@ -107,6 +124,9 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
 
         with self._predicted_timesteps_lock:
             self._predicted_timesteps = set()
+        
+        # Note: We intentionally do NOT reset self._loaded_policy_specs or self.policy
+        # to allow policy reuse across multiple client connections
 
     def Ready(self, request, context):  # noqa: N802
         client_id = context.peer()
@@ -144,32 +164,43 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             f"Device: {policy_specs.device}"
         )
 
-        self.device = policy_specs.device
-        self.policy_type = policy_specs.policy_type  # act, pi0, etc.
-        self.lerobot_features = policy_specs.lerobot_features
-        self.actions_per_chunk = policy_specs.actions_per_chunk
+        # Check if we can reuse the already loaded policy
+        if self._should_reload_policy(policy_specs):
+            self.logger.info("Loading policy onto device...")
+            
+            self.device = policy_specs.device
+            self.policy_type = policy_specs.policy_type  # act, pi0, etc.
+            self.lerobot_features = policy_specs.lerobot_features
+            self.actions_per_chunk = policy_specs.actions_per_chunk
 
-        policy_class = get_policy_class(self.policy_type)
+            policy_class = get_policy_class(self.policy_type)
 
-        start = time.perf_counter()
-        self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
-        self.policy.to(self.device)
+            start = time.perf_counter()
+            self.policy = policy_class.from_pretrained(policy_specs.pretrained_name_or_path)
+            self.policy.to(self.device)
 
-        # Load preprocessor and postprocessor, overriding device to match requested device
-        device_override = {"device": self.device}
-        self.preprocessor, self.postprocessor = make_pre_post_processors(
-            self.policy.config,
-            pretrained_path=policy_specs.pretrained_name_or_path,
-            preprocessor_overrides={
-                "device_processor": device_override,
-                "rename_observations_processor": {"rename_map": policy_specs.rename_map},
-            },
-            postprocessor_overrides={"device_processor": device_override},
-        )
+            # Load preprocessor and postprocessor, overriding device to match requested device
+            device_override = {"device": self.device}
+            self.preprocessor, self.postprocessor = make_pre_post_processors(
+                self.policy.config,
+                pretrained_path=policy_specs.pretrained_name_or_path,
+                preprocessor_overrides={
+                    "device_processor": device_override,
+                    "rename_observations_processor": {"rename_map": policy_specs.rename_map},
+                },
+                postprocessor_overrides={"device_processor": device_override},
+            )
 
-        end = time.perf_counter()
+            end = time.perf_counter()
 
-        self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
+            self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
+            
+            # Cache the loaded policy specs
+            self._loaded_policy_specs = policy_specs
+        else:
+            self.logger.info("♻️  Reusing already loaded policy (same configuration detected)")
+            # Still update these in case they changed
+            self.actions_per_chunk = policy_specs.actions_per_chunk
 
         return services_pb2.Empty()
 
