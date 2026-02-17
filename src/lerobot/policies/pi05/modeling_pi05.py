@@ -426,8 +426,24 @@ class PaliGemmaWithExpertModel(
         if self.train_expert_only:
             self.paligemma.eval()
 
+    @torch.compiler.disable()  # Disable compilation for vision embedding to avoid long compile times
     def embed_image(self, image: torch.Tensor):
-        return self.paligemma.model.get_image_features(image)
+        import logging
+        import time
+        logger = logging.getLogger(__name__)
+        logger.info(f"[DEBUG] embed_image: Called with input shape {image.shape}, device {image.device}, dtype {image.dtype}")
+        logger.info(f"[DEBUG] embed_image: paligemma.model device: {next(self.paligemma.model.parameters()).device}")
+        logger.info(f"[DEBUG] embed_image: Model training mode: {self.paligemma.model.training}")
+        
+        start_time = time.time()
+        logger.info(f"[DEBUG] embed_image: Calling paligemma.model.get_image_features...")
+        
+        with torch.inference_mode():
+            result = self.paligemma.model.get_image_features(image)
+        
+        elapsed = time.time() - start_time
+        logger.info(f"[DEBUG] embed_image: get_image_features completed in {elapsed:.3f}s, result shape {result.shape}")
+        return result
 
     def embed_language_tokens(self, tokens: torch.Tensor):
         return self.paligemma.language_model.embed_tokens(tokens)
@@ -639,6 +655,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         time = time_beta * self.config.time_sampling_scale + self.config.time_sampling_offset
         return time.to(dtype=torch.float32, device=device)
 
+    @torch.compiler.disable()  # Disable compilation to avoid long compile times for vision model
     def embed_prefix(
         self, images, img_masks, tokens, masks
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -653,13 +670,18 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
 
         # Process images
         logger.info(f"[DEBUG] embed_prefix: Processing {len(images)} images...")
-        for img, img_mask in zip(images, img_masks, strict=True):
+        for idx, (img, img_mask) in enumerate(zip(images, img_masks, strict=True)):
+            logger.info(f"[DEBUG] embed_prefix: Starting image {idx+1}/{len(images)}, shape: {img.shape}, device: {img.device}")
 
             def image_embed_func(img):
-                return self.paligemma_with_expert.embed_image(img)
+                logger.info(f"[DEBUG] embed_prefix: Calling embed_image for image {idx+1}...")
+                result = self.paligemma_with_expert.embed_image(img)
+                logger.info(f"[DEBUG] embed_prefix: embed_image completed for image {idx+1}, result shape: {result.shape}")
+                return result
 
             img_emb = self._apply_checkpoint(image_embed_func, img)
             bsize, num_img_embs = img_emb.shape[:2]
+            logger.info(f"[DEBUG] embed_prefix: Image {idx+1} embedded successfully, emb shape: {img_emb.shape}")
 
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
@@ -807,6 +829,16 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         """Do a full inference forward and compute the action."""
         import logging
         logger = logging.getLogger(__name__)
+        
+        # Log compilation warning on first call
+        if not hasattr(self, '_first_call_warned'):
+            if hasattr(self.sample_actions, '_torchdynamo_orig_callable'):
+                logger.warning(
+                    "⚠️  First call to compiled sample_actions - this may take 1-2 minutes for JIT compilation. "
+                    "Subsequent calls will be much faster."
+                )
+            self._first_call_warned = True
+        
         logger.info(f"[DEBUG] sample_actions: Starting with num_steps={num_steps or self.config.num_inference_steps}")
         
         if num_steps is None:
