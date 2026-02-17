@@ -856,8 +856,6 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
                 )
             self._first_call_warned = True
         
-        logger.info(f"[DEBUG] sample_actions: Starting with num_steps={num_steps or self.config.num_inference_steps}")
-        
         if num_steps is None:
             num_steps = self.config.num_inference_steps
 
@@ -873,21 +871,13 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             )  # Use config max_action_dim for internal processing
             noise = self.sample_noise(actions_shape, device)
 
-        logger.info(f"[DEBUG] sample_actions: Calling embed_prefix...")
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
-        logger.info(f"[DEBUG] sample_actions: embed_prefix complete, creating attention masks...")
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
         prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
 
-        logger.info(f"[DEBUG] sample_actions: Calling paligemma_with_expert.forward for prefix...")
-        logger.info(f"[DEBUG] sample_actions: Model training mode: {self.paligemma_with_expert.training}")
-        logger.info(f"[DEBUG] sample_actions: Input embeds shape: {prefix_embs.shape}, device: {prefix_embs.device}")
-        
-        import time as time_module
-        forward_start = time_module.time()
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
@@ -895,14 +885,11 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
         )
-        forward_elapsed = time_module.time() - forward_start
-        logger.info(f"[DEBUG] sample_actions: Prefix forward complete in {forward_elapsed:.3f}s, starting denoising loop with {num_steps} steps...")
 
         dt = -1.0 / num_steps
 
         x_t = noise
         for step in range(num_steps):
-            logger.info(f"[DEBUG] sample_actions: Denoising step {step}/{num_steps}")
             time = 1.0 + step * dt
             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
 
