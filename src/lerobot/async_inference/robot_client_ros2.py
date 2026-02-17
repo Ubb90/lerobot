@@ -118,6 +118,9 @@ class RobotClientROS2Config:
     )
     fps: int = field(default=DEFAULT_FPS, metadata={"help": "Observation streaming rate in Hz"})
     control_frequency: float = field(default=2.0, metadata={"help": "Action execution frequency in Hz"})
+    grpc_timeout: float = field(
+        default=30.0, metadata={"help": "gRPC timeout in seconds for receiving actions from server"}
+    )
 
     # ROS2 topic configuration
     camera_topics: List[str] = field(
