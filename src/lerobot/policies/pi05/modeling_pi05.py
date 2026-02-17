@@ -643,11 +643,16 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self, images, img_masks, tokens, masks
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[DEBUG] embed_prefix: Starting...")
+        
         embs = []
         pad_masks = []
         att_masks = []
 
         # Process images
+        logger.info(f"[DEBUG] embed_prefix: Processing {len(images)} images...")
         for img, img_mask in zip(images, img_masks, strict=True):
 
             def image_embed_func(img):
@@ -660,6 +665,8 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
             att_masks += [0] * num_img_embs
 
+        logger.info(f"[DEBUG] embed_prefix: Image processing complete, processing language tokens...")
+        
         # Process language tokens
         def lang_embed_func(tokens):
             lang_emb = self.paligemma_with_expert.embed_language_tokens(tokens)
@@ -667,6 +674,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             return lang_emb * math.sqrt(lang_emb_dim)
 
         lang_emb = self._apply_checkpoint(lang_embed_func, tokens)
+        logger.info(f"[DEBUG] embed_prefix: Language embedding complete...")
         embs.append(lang_emb)
         pad_masks.append(masks)
 
@@ -680,6 +688,7 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         bsize = pad_masks.shape[0]
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
+        logger.info(f"[DEBUG] embed_prefix: Complete!")
         return embs, pad_masks, att_masks
 
     def embed_suffix(self, noisy_actions, timestep):
@@ -796,6 +805,10 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         **kwargs: Unpack[ActionSelectKwargs],
     ) -> Tensor:
         """Do a full inference forward and compute the action."""
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.info(f"[DEBUG] sample_actions: Starting with num_steps={num_steps or self.config.num_inference_steps}")
+        
         if num_steps is None:
             num_steps = self.config.num_inference_steps
 
@@ -811,13 +824,16 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             )  # Use config max_action_dim for internal processing
             noise = self.sample_noise(actions_shape, device)
 
+        logger.info(f"[DEBUG] sample_actions: Calling embed_prefix...")
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, tokens, masks)
+        logger.info(f"[DEBUG] sample_actions: embed_prefix complete, creating attention masks...")
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_position_ids = torch.cumsum(prefix_pad_masks, dim=1) - 1
 
         prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks)
         self.paligemma_with_expert.paligemma.language_model.config._attn_implementation = "eager"  # noqa: SLF001
 
+        logger.info(f"[DEBUG] sample_actions: Calling paligemma_with_expert.forward for prefix...")
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=prefix_position_ids,
@@ -825,11 +841,13 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
         )
+        logger.info(f"[DEBUG] sample_actions: Prefix forward complete, starting denoising loop with {num_steps} steps...")
 
         dt = -1.0 / num_steps
 
         x_t = noise
         for step in range(num_steps):
+            logger.info(f"[DEBUG] sample_actions: Denoising step {step}/{num_steps}")
             time = 1.0 + step * dt
             time_tensor = torch.tensor(time, dtype=torch.float32, device=device).expand(bsize)
 
