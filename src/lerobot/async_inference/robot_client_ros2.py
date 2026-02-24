@@ -1075,10 +1075,10 @@ class RobotClientROS2(Node):
                 x=float(action_data["pose"][0]), y=float(action_data["pose"][1]), z=float(action_data["pose"][2])
             )
             pose_msg.orientation = Quaternion(
-                x=float(action_data["rotation"][0]),
-                y=float(action_data["rotation"][1]),
-                z=float(action_data["rotation"][2]),
-                w=float(action_data["rotation"][3]),
+                w=float(action_data["rotation"][0]),
+                x=float(action_data["rotation"][1]),
+                y=float(action_data["rotation"][2]),
+                z=float(action_data["rotation"][3]),
             )
             self.ee_pose_pub.publish(pose_msg)
             
