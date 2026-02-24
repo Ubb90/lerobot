@@ -844,18 +844,6 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         **kwargs: Unpack[ActionSelectKwargs],
     ) -> Tensor:
         """Do a full inference forward and compute the action."""
-        import logging
-        logger = logging.getLogger(__name__)
-        
-        # Log compilation warning on first call
-        if not hasattr(self, '_first_call_warned'):
-            if hasattr(self.sample_actions, '_torchdynamo_orig_callable'):
-                logger.warning(
-                    "⚠️  First call to compiled sample_actions - this may take 1-2 minutes for JIT compilation. "
-                    "Subsequent calls will be much faster."
-                )
-            self._first_call_warned = True
-        
         if num_steps is None:
             num_steps = self.config.num_inference_steps
 
@@ -1323,6 +1311,16 @@ class PI05Policy(PreTrainedPolicy):
     def predict_action_chunk(self, batch: dict[str, Tensor], **kwargs: Unpack[ActionSelectKwargs]) -> Tensor:
         """Predict a chunk of actions given environment observations."""
         self.eval()
+
+        # Log compilation warning on first call
+        if not hasattr(self, '_first_call_warned'):
+            logger = logging.getLogger(__name__)
+            if hasattr(self.model.sample_actions, '_torchdynamo_orig_callable'):
+                logger.warning(
+                    "⚠️  First call to compiled sample_actions - this may take 1-2 minutes for JIT compilation. "
+                    "Subsequent calls will be much faster."
+                )
+            self._first_call_warned = True
 
         # Prepare inputs
         images, img_masks = self._preprocess_images(batch)
