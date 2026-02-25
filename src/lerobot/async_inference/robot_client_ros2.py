@@ -1006,7 +1006,7 @@ class RobotClientROS2(Node):
         else:
             return {
                 "pose": action_np[:3],  # [x, y, z]
-                "rotation": action_np[3:7],  # [qx, qy, qz, qw]
+                "rotation": action_np[3:7],  # [qw, qx, qy, qz]
                 "gripper": float(action_np[7]) if len(action_np) > 7 else 0.0,
             }
 
@@ -1093,7 +1093,7 @@ class RobotClientROS2(Node):
 
             # Publish gripper
             gripper_msg = Bool()
-            gripper_msg.data = bool(action_data["gripper"] > 0.5)
+            gripper_msg.data = bool(action_data["gripper"] < 0.5)
             self.gripper_pub.publish(gripper_msg)
 
             self.logger.info(f"📤 PUBLISHED gripper to {self.config.gripper_topic}: {gripper_msg.data}")
@@ -1117,24 +1117,25 @@ class RobotClientROS2(Node):
             # build_dataset_frame will convert them to the proper tensor format
             if self.latest_robot_pose is not None:
                 # End effector position (x, y, z)
-                raw_observation["ee_pos_x"] = float(self.latest_robot_pose[0])
-                raw_observation["ee_pos_y"] = float(self.latest_robot_pose[1])
-                raw_observation["ee_pos_z"] = float(self.latest_robot_pose[2])
+                raw_observation["right_arm_ee_pos_x"] = float(self.latest_robot_pose[0])
+                raw_observation["right_arm_ee_pos_y"] = float(self.latest_robot_pose[1])
+                raw_observation["right_arm_ee_pos_z"] = float(self.latest_robot_pose[2])
                 
                 # End effector rotation (quaternion: qx, qy, qz, qw)
-                raw_observation["ee_rot_qx"] = float(self.latest_robot_pose[3])
-                raw_observation["ee_rot_qy"] = float(self.latest_robot_pose[4])
-                raw_observation["ee_rot_qz"] = float(self.latest_robot_pose[5])
-                raw_observation["ee_rot_qw"] = float(self.latest_robot_pose[6])
+                # NOTE: latest_robot_pose stores [x, y, z, qx, qy, qz, qw]
+                raw_observation["right_arm_ee_rot_x"] = float(self.latest_robot_pose[3])
+                raw_observation["right_arm_ee_rot_y"] = float(self.latest_robot_pose[4])
+                raw_observation["right_arm_ee_rot_z"] = float(self.latest_robot_pose[5])
+                raw_observation["right_arm_ee_rot_w"] = float(self.latest_robot_pose[6])
                     
             # Add gripper state from joint states
             if self.latest_joint_states is not None:
                 num_arm_joints = len(self.config.joint_position_keys)
                 if len(self.latest_joint_states) > num_arm_joints:
-                    raw_observation["gripper"] = float(self.latest_joint_states[num_arm_joints])
+                    raw_observation["gripper_pos"] = float(self.latest_joint_states[num_arm_joints])
                 else:
                     # Fallback to 0 if no gripper data
-                    raw_observation["gripper"] = 0.0
+                    raw_observation["gripper_pos"] = 0.0
 
             # Add action history if configured (for temporal conditioning)
             action_history_obs = self._get_action_history_observation()
