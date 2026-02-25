@@ -503,19 +503,20 @@ class RobotClientROS2(Node):
             hw_features = {}
             
             # Model expects 8 state dimensions: 3 position (x,y,z) + 4 rotation (qx,qy,qz,qw) + 1 gripper
+            # Names must match the dataset feature names in info.json exactly.
             # End effector position (x, y, z)
-            hw_features["ee_pos_x"] = float
-            hw_features["ee_pos_y"] = float
-            hw_features["ee_pos_z"] = float
+            hw_features["right_arm_ee_pos_x"] = float
+            hw_features["right_arm_ee_pos_y"] = float
+            hw_features["right_arm_ee_pos_z"] = float
             
-            # End effector rotation (quaternion: qx, qy, qz, qw)
-            hw_features["ee_rot_qx"] = float
-            hw_features["ee_rot_qy"] = float
-            hw_features["ee_rot_qz"] = float
-            hw_features["ee_rot_qw"] = float
+            # End effector rotation (quaternion: qw, qx, qy, qz — w first, matching dataset order)
+            hw_features["right_arm_ee_rot_w"] = float
+            hw_features["right_arm_ee_rot_x"] = float
+            hw_features["right_arm_ee_rot_y"] = float
+            hw_features["right_arm_ee_rot_z"] = float
             
             # Gripper state
-            hw_features["gripper"] = float
+            hw_features["gripper_pos"] = float
             
             # Add camera features (mapped to shape tuples - height, width, channels)
             # Wait for at least one camera image to determine actual shape
