@@ -1074,7 +1074,15 @@ class LeRobotDataset(torch.utils.data.Dataset):
 
         # Add task as a string
         task_idx = item["task_index"].item()
-        item["task"] = self.meta.tasks.iloc[task_idx].name
+        task_row = self.meta.tasks.iloc[task_idx]
+        task_name = task_row.name
+        if not isinstance(task_name, str):
+            # Fallback for datasets with a numeric RangeIndex: look for a 'task' column
+            if "task" in self.meta.tasks.columns:
+                task_name = str(task_row["task"])
+            else:
+                task_name = str(task_name)
+        item["task"] = task_name
         return item
 
     def __repr__(self):
