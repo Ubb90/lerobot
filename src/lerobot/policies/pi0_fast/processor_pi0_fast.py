@@ -46,6 +46,24 @@ from lerobot.utils.constants import (
 )
 
 
+def _task_batch_to_strings(task: Any) -> list[str] | None:
+    if task is None:
+        return None
+    if isinstance(task, str):
+        return [task]
+    if isinstance(task, list) and all(isinstance(item, str) for item in task):
+        return task
+    if isinstance(task, tuple) and all(isinstance(item, str) for item in task):
+        return list(task)
+    if isinstance(task, torch.Tensor):
+        values = task.detach().cpu().reshape(-1).tolist()
+        return [str(value) for value in values]
+    if isinstance(task, np.ndarray):
+        values = task.reshape(-1).tolist() if task.ndim > 0 else [task.item()]
+        return [str(value) for value in values]
+    return [str(task)]
+
+
 @ProcessorStepRegistry.register(name="pi0_fast_prepare_state_tokenizer_processor_step")
 @dataclass
 class Pi0FastPrepareStateAndLanguageTokenizerProcessorStep(ProcessorStep):
@@ -78,7 +96,11 @@ class Pi0FastPrepareStateAndLanguageTokenizerProcessorStep(ProcessorStep):
         discretized_states = np.digitize(state_np, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
 
         full_prompts = []
-        for i, task in enumerate(tasks):
+        task_strings = _task_batch_to_strings(tasks)
+        if task_strings is None:
+            raise ValueError("No task found in complementary data")
+
+        for i, task in enumerate(task_strings):
             cleaned_text = task.strip().replace("_", " ").replace("\n", " ")
             state_str = " ".join(map(str, discretized_states[i]))
             full_prompt = f"Task: {cleaned_text}, State: {state_str};\n"
