@@ -179,6 +179,9 @@ class RobotClientROS2Config:
         metadata={"help": f"Name of aggregate function. Options: {list(AGGREGATE_FUNCTIONS.keys())}"},
     )
 
+    # When True the action rotation tensor is [x, y, z, w] instead of [w, x, y, z]
+    rotate_output: bool = field(default=False, metadata={"help": "Rotation output is [x, y, z, w] order instead of [w, x, y, z]"})
+
     # Debug configuration
     debug_visualize_queue_size: bool = field(
         default=False, metadata={"help": "Visualize the action queue size"}
@@ -1075,18 +1078,28 @@ class RobotClientROS2(Node):
             pose_msg.position = Point(
                 x=float(action_data["pose"][0]), y=float(action_data["pose"][1]), z=float(action_data["pose"][2])
             )
-            pose_msg.orientation = Quaternion(
-                w=float(action_data["rotation"][0]),
-                x=float(action_data["rotation"][1]),
-                y=float(action_data["rotation"][2]),
-                z=float(action_data["rotation"][3]),
-            )
+            if self.config.rotate_output:
+                # Real mode(model trained using real robot): rotation tensor is [x, y, z, w]
+                pose_msg.orientation = Quaternion(
+                    x=float(action_data["rotation"][0]),
+                    y=float(action_data["rotation"][1]),
+                    z=float(action_data["rotation"][2]),
+                    w=float(action_data["rotation"][3]),
+                )
+            else:
+                # Sim mode: rotation tensor is [w, x, y, z]
+                pose_msg.orientation = Quaternion(
+                    w=float(action_data["rotation"][0]),
+                    x=float(action_data["rotation"][1]),
+                    y=float(action_data["rotation"][2]),
+                    z=float(action_data["rotation"][3]),
+                )
             self.ee_pose_pub.publish(pose_msg)
             
             # Log publisher info
             pub_count = self.ee_pose_pub.get_subscription_count()
             self.logger.info(
-                f"📤 PUBLISHED to {self.config.ee_pose_topic} (subscribers: {pub_count}) | "
+                f"📤 PUBLISHED to {self.config.ee_pose_topic} (subscribers: {pub_count}) using rotate_output: {self.config.rotate_output} | "
                 f"pose=[{action_data['pose'][0]:.3f}, {action_data['pose'][1]:.3f}, {action_data['pose'][2]:.3f}] | "
                 f"quat=[{action_data['rotation'][0]:.3f}, {action_data['rotation'][1]:.3f}, "
                 f"{action_data['rotation'][2]:.3f}, {action_data['rotation'][3]:.3f}]"
