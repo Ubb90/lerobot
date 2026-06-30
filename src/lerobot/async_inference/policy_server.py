@@ -64,6 +64,36 @@ from .helpers import (
 )
 
 
+def _ablate_pi05_vision(policy, logger) -> None:
+    """Replace PI0.5 SigLIP vision_tower weights with random noise (ablation study)."""
+    vision_tower = policy.model.paligemma_with_expert.paligemma.vision_tower
+    for param in vision_tower.parameters():
+        torch.nn.init.normal_(param.data)
+    vision_tower.requires_grad_(False)
+    logger.info("[ABLATION] PI0.5 vision_tower (SigLIP) weights randomized.")
+
+
+def _ablate_pi05_action_head(policy, logger) -> None:
+    """Reinitialize PI0.5 action expert weights with random noise (ablation study).
+
+    Randomizes: gemma_expert, action_in_proj, action_out_proj, time_mlp_in, time_mlp_out.
+    The VLM backbone (paligemma) and its vision tower are left intact.
+    """
+    model = policy.model
+    action_modules = [
+        model.paligemma_with_expert.gemma_expert,
+        model.action_in_proj,
+        model.action_out_proj,
+        model.time_mlp_in,
+        model.time_mlp_out,
+    ]
+    for module in action_modules:
+        for param in module.parameters():
+            torch.nn.init.normal_(param.data)
+        module.requires_grad_(False)
+    logger.info("[ABLATION] PI0.5 action expert weights randomized (gemma_expert + projections).")
+
+
 class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
     prefix = "policy_server"
     logger = get_logger(prefix)
@@ -194,7 +224,13 @@ class PolicyServer(services_pb2_grpc.AsyncInferenceServicer):
             end = time.perf_counter()
 
             self.logger.info(f"Time taken to put policy on {self.device}: {end - start:.4f} seconds")
-            
+
+            if self.policy_type == "pi05":
+                if self.config.randomize_vision:
+                    _ablate_pi05_vision(self.policy, self.logger)
+                if self.config.randomize_mlp:
+                    _ablate_pi05_action_head(self.policy, self.logger)
+
             # Cache the loaded policy specs
             self._loaded_policy_specs = policy_specs
         else:

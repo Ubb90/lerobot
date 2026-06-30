@@ -73,6 +73,24 @@ class PolicyServerConfig:
         },
     )
 
+    # Ablation flags (PI0.5 only)
+    randomize_vision: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, replace the PI0.5 vision backbone (SigLIP vision_tower) weights with "
+            "random noise after loading. Vision backbone weights are frozen post-randomization. "
+            "Ablation study only."
+        },
+    )
+    randomize_mlp: bool = field(
+        default=False,
+        metadata={
+            "help": "If True, reinitialize the PI0.5 action expert weights (gemma_expert, "
+            "action_in_proj, action_out_proj, time_mlp_in, time_mlp_out) with random values "
+            "after loading. Action head weights are frozen post-randomization. Ablation study only."
+        },
+    )
+
     def __post_init__(self):
         """Validate configuration after initialization."""
         if self.port < 1 or self.port > 65535:

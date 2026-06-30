@@ -52,6 +52,7 @@ from pprint import pformat
 from queue import Queue
 from typing import Any, Dict, List
 
+import cv2
 import draccus
 import grpc
 import numpy as np
@@ -187,6 +188,11 @@ class RobotClientROS2Config:
         default=False, metadata={"help": "Visualize the action queue size"}
     )
     show_images: bool = field(default=False, metadata={"help": "Display camera images for debugging"})
+
+    blur_image: int = field(
+        default=0,
+        metadata={"help": "Gaussian blur level applied to camera frames before sending to policy (0=none, 100=max unrecognizable). Ablation study use only."},
+    )
 
     # Convergence settings
     wait_for_convergence: bool = field(
@@ -355,6 +361,21 @@ class RobotClientROS2(Node):
     def running(self):
         return not self.shutdown_event.is_set()
 
+    @staticmethod
+    def _apply_blur(image: np.ndarray, blur_level: int) -> np.ndarray:
+        """Apply Gaussian blur to a camera frame (ablation study).
+
+        blur_level: 0 = no blur, 100 = maximum blur (sigma=50, image unrecognizable).
+        Matches the formula used in eval_lerobot_ros2.py.
+        """
+        if blur_level <= 0:
+            return image
+        sigma = blur_level / 100.0 * 50.0
+        ksize = max(3, int(sigma * 6 + 1))
+        if ksize % 2 == 0:
+            ksize += 1
+        return cv2.GaussianBlur(image, (ksize, ksize), sigma)
+
     def camera_callback(self, msg: Image, camera_key: str):
         """Callback for camera image messages."""
         try:
@@ -373,6 +394,9 @@ class RobotClientROS2(Node):
             else:
                 self.logger.warn(f"Unsupported image encoding: {msg.encoding}")
                 return
+
+            if self.config.blur_image > 0:
+                cv_image = self._apply_blur(cv_image, self.config.blur_image)
 
             self.camera_images[camera_key] = cv_image
             self.logger.debug(
