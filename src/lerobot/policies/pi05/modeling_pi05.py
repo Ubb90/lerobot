@@ -428,21 +428,8 @@ class PaliGemmaWithExpertModel(
 
     @torch.compiler.disable()  # Disable compilation for vision embedding to avoid long compile times
     def embed_image(self, image: torch.Tensor):
-        import logging
-        import time
-        logger = logging.getLogger(__name__)
-        logger.info(f"[DEBUG] embed_image: Called with input shape {image.shape}, device {image.device}, dtype {image.dtype}")
-        logger.info(f"[DEBUG] embed_image: paligemma.model device: {next(self.paligemma.model.parameters()).device}")
-        logger.info(f"[DEBUG] embed_image: Model training mode: {self.paligemma.model.training}")
-        
-        start_time = time.time()
-        logger.info(f"[DEBUG] embed_image: Calling paligemma.model.get_image_features...")
-        
         with torch.inference_mode():
             result = self.paligemma.model.get_image_features(image)
-        
-        elapsed = time.time() - start_time
-        logger.info(f"[DEBUG] embed_image: get_image_features completed in {elapsed:.3f}s, result shape {result.shape}")
         return result
 
     def embed_language_tokens(self, tokens: torch.Tensor):
@@ -458,15 +445,9 @@ class PaliGemmaWithExpertModel(
         use_cache: bool | None = None,
         adarms_cond: list[torch.Tensor] | None = None,
     ):
-        import logging
-        import time
-        logger = logging.getLogger(__name__)
-        
         if adarms_cond is None:
             adarms_cond = [None, None]
         if inputs_embeds[1] is None:
-            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Taking prefix-only path")
-            start_time = time.time()
             prefix_output = self.paligemma.language_model.forward(
                 inputs_embeds=inputs_embeds[0],
                 attention_mask=attention_mask,
@@ -475,14 +456,10 @@ class PaliGemmaWithExpertModel(
                 use_cache=use_cache,
                 adarms_cond=adarms_cond[0] if adarms_cond is not None else None,
             )
-            elapsed = time.time() - start_time
-            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Prefix forward completed in {elapsed:.3f}s")
             prefix_past_key_values = prefix_output.past_key_values
             prefix_output = prefix_output.last_hidden_state
             suffix_output = None
         elif inputs_embeds[0] is None:
-            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Taking suffix-only path")
-            start_time = time.time()
             suffix_output = self.gemma_expert.model.forward(
                 inputs_embeds=inputs_embeds[1],
                 attention_mask=attention_mask,
@@ -491,14 +468,10 @@ class PaliGemmaWithExpertModel(
                 use_cache=use_cache,
                 adarms_cond=adarms_cond[1] if adarms_cond is not None else None,
             )
-            elapsed = time.time() - start_time
-            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Suffix forward completed in {elapsed:.3f}s")
             suffix_output = suffix_output.last_hidden_state
             prefix_output = None
             prefix_past_key_values = None
         else:
-            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Taking interleaved path with {self.paligemma.config.text_config.num_hidden_layers} layers")
-            start_time = time.time()
             models = [self.paligemma.language_model, self.gemma_expert.model]
             num_layers = self.paligemma.config.text_config.num_hidden_layers
 
@@ -558,8 +531,6 @@ class PaliGemmaWithExpertModel(
             prefix_output = outputs_embeds[0]
             suffix_output = outputs_embeds[1]
             prefix_past_key_values = None
-            elapsed = time.time() - start_time
-            logger.info(f"[DEBUG] PaliGemmaWithExpertModel.forward: Interleaved forward completed in {elapsed:.3f}s")
 
         return [prefix_output, suffix_output], prefix_past_key_values
 
@@ -677,35 +648,23 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         self, images, img_masks, tokens, masks
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Embed images with SigLIP and language tokens with embedding layer."""
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.info(f"[DEBUG] embed_prefix: Starting...")
-        
         embs = []
         pad_masks = []
         att_masks = []
 
         # Process images
-        logger.info(f"[DEBUG] embed_prefix: Processing {len(images)} images...")
-        for idx, (img, img_mask) in enumerate(zip(images, img_masks, strict=True)):
-            logger.info(f"[DEBUG] embed_prefix: Starting image {idx+1}/{len(images)}, shape: {img.shape}, device: {img.device}")
+        for img, img_mask in zip(images, img_masks, strict=True):
 
             def image_embed_func(img):
-                logger.info(f"[DEBUG] embed_prefix: Calling embed_image for image {idx+1}...")
-                result = self.paligemma_with_expert.embed_image(img)
-                logger.info(f"[DEBUG] embed_prefix: embed_image completed for image {idx+1}, result shape: {result.shape}")
-                return result
+                return self.paligemma_with_expert.embed_image(img)
 
             img_emb = self._apply_checkpoint(image_embed_func, img)
             bsize, num_img_embs = img_emb.shape[:2]
-            logger.info(f"[DEBUG] embed_prefix: Image {idx+1} embedded successfully, emb shape: {img_emb.shape}")
 
             embs.append(img_emb)
             pad_masks.append(img_mask[:, None].expand(bsize, num_img_embs))
             att_masks += [0] * num_img_embs
 
-        logger.info(f"[DEBUG] embed_prefix: Image processing complete, processing language tokens...")
-        
         # Process language tokens
         def lang_embed_func(tokens):
             lang_emb = self.paligemma_with_expert.embed_language_tokens(tokens)
@@ -713,7 +672,6 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
             return lang_emb * math.sqrt(lang_emb_dim)
 
         lang_emb = self._apply_checkpoint(lang_embed_func, tokens)
-        logger.info(f"[DEBUG] embed_prefix: Language embedding complete...")
         embs.append(lang_emb)
         pad_masks.append(masks)
 
@@ -727,7 +685,6 @@ class PI05Pytorch(nn.Module):  # see openpi `PI0Pytorch`
         bsize = pad_masks.shape[0]
         att_masks = att_masks[None, :].expand(bsize, len(att_masks))
 
-        logger.info(f"[DEBUG] embed_prefix: Complete!")
         return embs, pad_masks, att_masks
 
     def embed_suffix(self, noisy_actions, timestep):
