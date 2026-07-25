@@ -397,9 +397,6 @@ class PaliGemmaWithExpertModel(
             raise ValueError(f"Invalid precision: {precision}")
 
         params_to_keep_float32 = [
-            "vision_tower.vision_model.embeddings.patch_embedding.weight",
-            "vision_tower.vision_model.embeddings.patch_embedding.bias",
-            "vision_tower.vision_model.embeddings.position_embedding.weight",
             "input_layernorm",
             "post_attention_layernorm",
             "model.norm",
